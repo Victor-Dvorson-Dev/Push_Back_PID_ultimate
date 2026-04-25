@@ -9,8 +9,8 @@
 
 # Library imports
 import time
+import math
 from vex import *
-# import math
 
 # Parameters Definition and Robots Configuration
 brain = Brain()
@@ -19,7 +19,7 @@ tl = 7.382
 tr = 7.382
 pi = 3.14159
 # #Time_wait=0
-wheelFactor = pi * 3.25 / (4/3)
+wheelFactor = pi * 3.25 / (3/2)
 
 #motor gear teeth 24. wheel gear teeth 36
 # Motor Configuration
@@ -48,12 +48,14 @@ class GameElements:
 # AI Vision Color Descriptions
 # AI Vision Code Descriptions
 AI_clamp = AiVision(Ports.PORT15, AiVision.ALL_AIOBJS)
+frontDist = Distance(Ports.PORT9)
+rightDist = Distance(Ports.PORT10)
 
 # hookPneumatic = DigitalOut(brain.three_wire_port.a)
 # rightArm = Motor(Ports.PORT8, GearSetting.RATIO_18_1, False)
 # leftArm = Motor(Ports.PORT7, GearSetting.RATIO_18_1, True)
 
-def motor_Stop():  
+def motor_Stop():
     motorFL.stop()
     motorFR.stop()
     motorML.stop()
@@ -61,7 +63,7 @@ def motor_Stop():
     motorBL.stop()
     motorBR.stop()
 
-def motor_hold():  
+def motor_hold():
     motorFL.stop(HOLD)
     motorFR.stop(HOLD)
     motorML.stop(HOLD)
@@ -69,7 +71,7 @@ def motor_hold():
     motorBL.stop(HOLD)
     motorBR.stop(HOLD)
 
-def motor_brake():  
+def motor_brake():
     motorFL.stop(BRAKE)
     motorFR.stop(BRAKE)
     motorML.stop(BRAKE)
@@ -105,7 +107,24 @@ def calculate_Rotation_From_Wheels(xLeft, yRight, wheelFactor, tl, tr):
     rotationInRadians = (xLeft * wheelFactor - yRight * wheelFactor) / (tl + tr)
     return rotationInRadians
 
-def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_flag, Kp_l, Kp_r, previousError=[0.0,0.0]):
+def autonomousPID(
+    target,
+    initialMaxSpeedLimit,
+    maxSpeedLimit,
+    time_out,
+    export_flag,
+    Kp_l,
+    Kp_r,
+    previousError=None,
+    exit_velocity_pct=0.0,
+    slow_down_distance=6.0,
+    settle_error_dist=0.5,
+    settle_error_heading=0.03,
+    settle_loops=8,
+    stop_at_end=True,
+    heading_guard_deg=2.0,
+    heading_guard_floor=0.0,
+):
     """
     Drive a straight or turning motion using simple PID:
       - Encoders for distance
@@ -113,11 +132,16 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
     Simplified: no IMU acceleration, no drift PID.
 
     target: [target_distance_inches, target_heading_radians]
-
-    Speed-dependent slip compensation:
-    - At speed >= 80: 3% slip compensation (multiply distance by 1.03)
-    - At speed <= 40: 0% slip compensation (multiply distance by 1.0)
-    - Between 40-80: linear interpolation
+    exit_velocity_pct: keep this forward speed (percent) when finishing so
+      the next move can chain without a dead stop. Sign follows target distance.
+    slow_down_distance: within this many inches remaining, cap speed toward
+      exit_velocity_pct to create a soft decel instead of a hard stop.
+    settle_*: settle window thresholds and consecutive loop count required
+      before declaring the move complete.
+    stop_at_end: if False and exit_velocity_pct != 0, the loop returns while
+      motors stay commanded, allowing back-to-back profiles.
+    heading_guard_deg: above this heading error, forward output is scaled.
+    heading_guard_floor: minimum forward scaling (0 keeps full suppression).
     """
 
     global hook_flag
@@ -126,24 +150,8 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
 
     Reset_all()
 
-    # Calculate speed-dependent slip compensation
-    # Use maxSpeedLimit to determine slip factor
-    if maxSpeedLimit >= 80:
-        slip_factor = 1.03  # 3% compensation at high speed
-    elif maxSpeedLimit <= 40:
-        slip_factor = 1.005   # 0% compensation at low speed
-    else:
-        # Linear interpolation between 40 and 80
-        # slip_factor ranges from 1.0 to 1.03
-        slip_factor = 1.0 + 0.03 * (maxSpeedLimit - 40) / (80 - 40)
-
-    # Apply slip compensation to distance target (not rotation)
-    if target[0] != 0:
-        compensated_target = [target[0] * slip_factor, target[1]]
-        print("Speed:", maxSpeedLimit, "Slip factor:", '{:.4f}'.format(slip_factor))
-    else:
-        compensated_target = target
-
+    if previousError is None:
+        previousError = [0.0, 0.0]
     # --- PID constants ---
     Kp = Kp_l      # linear P
     Ki = 0.0
@@ -172,26 +180,22 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
 
     dt = 0.005                  # 200 Hz loop
     counter = 0
+    settle_counter = 0
     leftRotation = 0.0
     rightRotation = 0.0
 
     # ---------- Heading guard settings ----------
     # When heading error is larger than this angle, scale down forward output.
-    HEADING_GUARD_DEG = 1.0
+    # User-tunable heading guard. When heading error exceeds this angle,
+    # forward output is scaled down to prioritize turning. Set high (e.g., 45)
+    # or 0 to effectively disable. heading_guard_floor keeps some forward feed.
+    HEADING_GUARD_DEG = heading_guard_deg
     # -------------------------------------------
 
     while True:
         # --- 1. Compute errors ---
-        if maxSpeedLimit >= 75 and compensated_target[1] >= 40:
-            HEADING_BIAS = 0.06  # radians
-        elif maxSpeedLimit <= 40 and compensated_target[1] >= 40:
-            HEADING_BIAS = 0.015  # radians
-        elif maxSpeedLimit >= 75 and compensated_target[1] < 40:
-            HEADING_BIAS = 0.03  # radians
-        else:
-            HEADING_BIAS = 0.0  # radians
-        error[0] = compensated_target[0] - currentPosition[0]   # distance error (inches)
-        error[1] = compensated_target[1] - currentPosition[1] - HEADING_BIAS   # heading error (radians)
+        error[0] = target[0] - currentPosition[0]   # distance error (inches)
+        error[1] = target[1] - currentPosition[1]   # heading error (radians)
 
         # --- 2. Integrals & derivatives ---
         integral += error[0] * dt
@@ -203,18 +207,6 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
         # --- 3. Raw PID outputs (before guards/limits) ---
         xOutput = (Kp * error[0]) + (Ki * integral) + (Kd * derivative)
 
-        # adding slowdown near target
-        # slowdown_start = 6.0  # inches
-        # abs_dist_err = abs(error[0])
-        # if abs_dist_err < slowdown_start and abs_dist_err > 1.0:
-        #     scale = abs_dist_err / slowdown_start
-        #     if scale < 0.0:
-        #         scale = 0.0
-        #     elif scale > 1.0:
-        #         scale = 1.0
-        #     xOutput *= scale
-        
-
         turnSpeed = (KpRotation * error[1] +
                      KiRotation * headingIntegral +
                      KdRotation * headingDerivative)
@@ -224,11 +216,11 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
         heading_error_deg = error[1] * 180.0 / pi
         abs_head_err = abs(heading_error_deg)
 
-        if abs_head_err > HEADING_GUARD_DEG:
+        if HEADING_GUARD_DEG > 0 and abs_head_err > HEADING_GUARD_DEG:
             # Scale forward down when heading is off.
             scale = HEADING_GUARD_DEG / abs_head_err
-            if scale < 0.0:
-                scale = 0.0
+            if scale < heading_guard_floor:
+                scale = heading_guard_floor
             elif scale > 1.0:
                 scale = 1.0
             xOutput *= scale
@@ -242,7 +234,17 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
         motorBLSpeed = xOutput + turnSpeed
         motorBRSpeed = xOutput - turnSpeed
 
-        # --- 5. Speed limiting (existing ramp logic) ---
+        # --- 5. Speed limiting with optional soft decel profile ---
+        # Dynamic cap near the goal to avoid a hard stop. When far, use the
+        # provided maxSpeedLimit; inside slow_down_distance, linearly blend
+        # toward exit_velocity_pct.
+        distance_remaining = abs(error[0])
+        exit_speed = abs(exit_velocity_pct)
+        dynamic_limit = maxSpeedLimit
+        if slow_down_distance > 0:
+            blend = min(1.0, max(0.0, distance_remaining / slow_down_distance))
+            dynamic_limit = exit_speed + (maxSpeedLimit - exit_speed) * blend
+
         if counter <= 100:
             maxSpeed = max(abs(motorFLSpeed), abs(motorFRSpeed),
                            abs(motorMLSpeed), abs(motorMRSpeed),
@@ -259,14 +261,14 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
             maxSpeed = max(abs(motorFLSpeed), abs(motorFRSpeed),
                            abs(motorMLSpeed), abs(motorMRSpeed),
                            abs(motorBLSpeed), abs(motorBRSpeed),
-                           maxSpeedLimit)
-            if maxSpeed > maxSpeedLimit:
-                motorFLSpeed = (motorFLSpeed / maxSpeed) * maxSpeedLimit
-                motorFRSpeed = (motorFRSpeed / maxSpeed) * maxSpeedLimit
-                motorMLSpeed = (motorMLSpeed / maxSpeed) * maxSpeedLimit
-                motorMRSpeed = (motorMRSpeed / maxSpeed) * maxSpeedLimit
-                motorBLSpeed = (motorBLSpeed / maxSpeed) * maxSpeedLimit
-                motorBRSpeed = (motorBRSpeed / maxSpeed) * maxSpeedLimit
+                           dynamic_limit)
+            if maxSpeed > dynamic_limit:
+                motorFLSpeed = (motorFLSpeed / maxSpeed) * dynamic_limit
+                motorFRSpeed = (motorFRSpeed / maxSpeed) * dynamic_limit
+                motorMLSpeed = (motorMLSpeed / maxSpeed) * dynamic_limit
+                motorMRSpeed = (motorMRSpeed / maxSpeed) * dynamic_limit
+                motorBLSpeed = (motorBLSpeed / maxSpeed) * dynamic_limit
+                motorBRSpeed = (motorBRSpeed / maxSpeed) * dynamic_limit
 
         # --- 6. Command the motors ---
         motor_Motion(motorFLSpeed, motorFRSpeed,
@@ -302,10 +304,28 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
             print('{:.5f}'.format(turnSpeed), end="\t")
             print('{:.5f}'.format(motorFLSpeed), end="\n")
 
-        # --- 10. Exit conditions ---
-        if abs(error[0]) < 0.03 and abs(error[1]) < 0.015:
+        # --- 10. Exit conditions with settle window ---
+        if abs(error[0]) < settle_error_dist and abs(error[1]) < settle_error_heading:
+            settle_counter += 1
+        else:
+            settle_counter = 0
+
+        if settle_counter >= settle_loops:
             print("COMPLETE!!!")
-            motor_Stop()
+            if stop_at_end or exit_velocity_pct == 0.0:
+                motor_Stop()
+            else:
+                # Maintain a small exit velocity in the direction of travel
+                forward = exit_velocity_pct if target[0] >= 0 else -exit_velocity_pct
+                motorFLSpeed = forward + turnSpeed
+                motorFRSpeed = forward - turnSpeed
+                motorMLSpeed = forward + turnSpeed
+                motorMRSpeed = forward - turnSpeed
+                motorBLSpeed = forward + turnSpeed
+                motorBRSpeed = forward - turnSpeed
+                motor_Motion(motorFLSpeed, motorFRSpeed,
+                             motorBLSpeed, motorBRSpeed,
+                             motorMLSpeed, motorMRSpeed)
             print(error)
             print(counter)
             return error
@@ -318,6 +338,102 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
 
         time.sleep(dt)
         counter += 1
+
+
+def read_dist_mm_filtered(sensor, samples=3, sample_delay_ms=0, min_mm=20, max_mm=2000, fallback=None):
+    values = []
+    for _ in range(max(1, samples)):
+        mm = sensor.object_distance(MM)
+        if min_mm <= mm <= max_mm:
+            values.append(mm)
+        if sample_delay_ms > 0:
+            wait(sample_delay_ms, MSEC)
+
+    if values:
+        values.sort()
+        mid = len(values) // 2
+        if len(values) % 2 == 1:
+            return values[mid]
+        return (values[mid - 1] + values[mid]) / 2.0
+
+    if fallback is not None:
+        return fallback
+    return max_mm
+
+
+def finalize_to_front_wall(
+    target_mm,
+    timeout_ms=2500,
+    kp=0.12,
+    ki=0.0,
+    kd=0.03,
+    max_speed_pct=35.0,
+    min_speed_pct=7.0,
+    tolerance_mm=12.0,
+    settle_loops=8,
+    control_period_ms=5,
+    sensor_period_ms=20,
+    integral_limit=6000.0,
+):
+    dt = control_period_ms / 1000.0
+    integral = 0.0
+    settle_count = 0
+    start_ms = brain.timer.time(MSEC)
+    last_sensor_ms = start_ms - sensor_period_ms
+    last_dist = read_dist_mm_filtered(frontDist)
+    last_error = last_dist - target_mm
+
+    while (brain.timer.time(MSEC) - start_ms) < timeout_ms:
+        loop_start_ms = brain.timer.time(MSEC)
+        sensor_updated = False
+        if (loop_start_ms - last_sensor_ms) >= sensor_period_ms:
+            last_dist = read_dist_mm_filtered(frontDist, fallback=last_dist)
+            sensor_updated = True
+            last_sensor_ms = loop_start_ms
+
+        dist_mm = last_dist
+
+        error = dist_mm - target_mm
+        integral += error * dt
+        if integral > integral_limit:
+            integral = integral_limit
+        elif integral < -integral_limit:
+            integral = -integral_limit
+        if sensor_updated:
+            derivative_dt = sensor_period_ms / 1000.0
+            if derivative_dt <= 0:
+                derivative_dt = dt
+            derivative = (error - last_error) / derivative_dt
+            last_error = error
+        else:
+            derivative = 0.0
+        output = kp * error + ki * integral + kd * derivative
+
+        if output > max_speed_pct:
+            output = max_speed_pct
+        elif output < -max_speed_pct:
+            output = -max_speed_pct
+
+        if abs(error) > tolerance_mm and abs(output) < min_speed_pct:
+            output = min_speed_pct if output >= 0 else -min_speed_pct
+
+        motor_Motion(output, output, output, output, output, output)
+
+        if abs(error) <= tolerance_mm:
+            settle_count += 1
+        else:
+            settle_count = 0
+
+        if settle_count >= settle_loops:
+            break
+
+        loop_elapsed_ms = brain.timer.time(MSEC) - loop_start_ms
+        remaining_ms = control_period_ms - loop_elapsed_ms
+        if remaining_ms > 0:
+            wait(remaining_ms, MSEC)
+
+    motor_Stop()
+    return last_dist - target_mm
 
 # def set_and_run_rollers(v_low,v_mid,v_top):
 #     intakeMotor_1.set_velocity(v_low,PERCENT)
@@ -342,7 +458,7 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
 #     set_and_run_rollers(0*velocity,-1*velocity,-1*velocity)
 
 # def intake_ground_to_basket(velocity):
-#     set_and_run_rollers(1*velocity,1*velocity,1*velocity)    
+#     set_and_run_rollers(1*velocity,1*velocity,1*velocity)
 
 # def intake_ground_cycle_at_top(velocity):
 #     #topv orgininaly -0.6
@@ -387,8 +503,8 @@ def autonomousPID(target, initialMaxSpeedLimit, maxSpeedLimit, time_out, export_
 #             intakeMotor.spin(DirectionType.FORWARD, 100, VelocityUnits.PERCENT)
 #         else:
 #             intakeMotor.stop()
-            
-        
+
+
 
 # create competition instance
 # comp = Competition(user_control, autonomous)
@@ -411,12 +527,15 @@ def vexcode_auton_function():
     auton_task_0.stop()
 def when_started1():
     global myVariable
-    pass
+    # Optional: auto-run one of the test profiles when code starts.
+    # Set TEST_TO_RUN (above) to "move60", "arc", "chain", "turn", or "smooth".
+    if TEST_TO_RUN is not None:
+        run_selected_test(TEST_TO_RUN)
 def onauton_autonomous_0():
 
     t_1=brain.timer.time(MSEC)
     inertialSensor.calibrate()
-        
+
     # global #Time_wait
     # Wait until calibration is complete
     while inertialSensor.is_calibrating():
@@ -429,326 +548,7 @@ def onauton_autonomous_0():
             wait(100, TimeUnits.MSEC)  # Check every 100 ms
 
 
-    # defult_time=200
 
-    # intake_ground_hold_in_basket_top(100)
-    
-    # Time_wait=defult_time
-    # extra_buffer=-11
-    # intake_v=90
-    # print("calibration finished")
-    # v_min=20
-    # v_max=60
-    # export_flag=0
-    # r_offset=math.radians(-180)
-    # Time_wait=350
-    # cap.set(False)
-    # arm.set(True)
-
-
-    # cap.set(True)
-    # intake_ground_hold_in_basket(100)
-    # return
-    # v_min=20
-    # v_max=20
-    # f=20
-    # r=0
-    # Kp_linear=4
-    # Kp_rotation=55
-    # autonomousPID([f, math.radians(r)], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # return
-    # intake_ground_to_top(100)
-    # cap.set(True)
-    # arm.set(False)
-    # return
-
-
-    # f=35.25
-    # r=0
-    # Kp_linear=4
-    # Kp_rotation=30
-    # autonomousPID([f, math.radians(r)], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # Time_wait=250
-    # f=0
-    # r=-90
-    # Kp_linear=4
-    # Kp_rotation=30
-    # autonomousPID([f, math.radians(r)], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # export_flag=1
-    # Time_wait=900
-    # intake_ground_hold_in_basket(100)
-    # v_min=30
-    # v_max=40
-    # f=12
-    # r=90
-    # Kp_linear=4
-    # Kp_rotation=30
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # # for i in range (4):
-    # #     f=1
-    # #     r=90
-    # #     Kp_linear=4
-    # #     Kp_rotation=30
-    # #     autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    # #                 Kp_linear,Kp_rotation)
-    # #     wait(10,MSEC)
-    # motor_brake()
-    
-    # #motor_brake()
-
-    # # v_min=20
-    # # v_max=20
-    # # f=-0.2
-    # # r=90
-    # # Kp_linear=2
-    # # Kp_rotation=30
-    # # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    # #               Kp_linear,Kp_rotation)
-
-    # Time_wait=250
-    # f=-5
-    # r=90
-    # Kp_linear=6
-    # Kp_rotation=30
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    
-    # v_max=40
-    # f=0
-    # r=-86.5
-    # Kp_linear=4
-    # Kp_rotation=30
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # arm.set(False)
-    
-    # all_intake_stop()
-    # cap.set(True)
-    # v_min=20
-    # v_max=40
-    # Time_wait=300
-    # f=17.75
-    # r=-86.5
-    # Kp_linear=4
-    # Kp_rotation=25
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    
-    # v_min=20
-    # v_max=40
-    # Time_wait=100
-    # f=-1
-    # r=-86.5
-    # Kp_linear=4
-    # Kp_rotation=25
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # intake_ground_to_top(100)
-
-    # wait(4, SECONDS)
-    # all_intake_stop()
-    # Time_wait=1200
-    # v_min=20
-    # v_max=40
-    # f=-90.5
-    # r=-180
-    # Kp_linear=1.5
-    # Kp_rotation=60
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # arm.set(True)
-    # Time_wait=400
-    # v_min=20
-    # v_max=40
-    # f=0
-    # r=-266
-    # Kp_linear=2.3
-    # Kp_rotation=30
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # cap.set(False)    
-    
-    # intake_ground_hold_in_basket(100)
-    # Time_wait=1600
-    # v_min=40
-    # v_max=50
-    # #previous v_max=40
-    # f=20
-    # r=-266
-    # Kp_linear=3
-    # Kp_rotation=40
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # #motor_brake()
-    
-    # all_intake_stop()
-    
-    # Time_wait=300
-    # v_min=20
-    # v_max=40
-    # f=-5
-    # r=-266
-    # Kp_linear=3
-    # Kp_rotation=40
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # arm.set(False)
-    # cap.set(True)  
-    # Time_wait=300
-    # v_min=20
-    # v_max=40
-    # f=0
-    # r=-77
-    # Kp_linear=3
-    # Kp_rotation=40
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    
-    # Time_wait=400
-    # v_min=20
-    # v_max=40
-    # f=20
-    # r=-79
-    # Kp_linear=3
-    # Kp_rotation=30
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # intake_ground_to_top(100)
-
-    # wait(4,SECONDS)
-    # intake_ground_hold_in_basket(100)
-    # Time_wait=1000
-    # v_min=20
-    # v_max=40
-    # f=-46
-    # r=0
-    # Kp_linear=1.3
-    # Kp_rotation=52
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    
-    # Time_wait=400
-    # v_min=20
-    # v_max=40
-    # f=0
-    # r=90
-    # Kp_linear=1.8
-    # Kp_rotation=30
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    
-    # Time_wait=400
-    # v_min=20
-    # v_max=40
-    # f=-6
-    # r=90
-    # Kp_linear=3
-    # Kp_rotation=30
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    
-    # Time_wait=400
-    # v_min=50
-    # v_max=60
-    # f=50
-    # r=90
-    # Kp_linear=4
-    # Kp_rotation=30
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    
-    # return
-    # intake_ground_hold_in_basket(100)
-    # Time_wait=500
-    # f=0
-    # r=-265
-    # Kp_linear=2.5
-    # Kp_rotation=30
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # v_min=10
-    # v_max=20
-    # f=-6
-    # r=-265
-    # Kp_linear=4
-    # Kp_rotation=30
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # v_min=40
-    # v_max=70
-    # f=45
-    # r=-265
-    # Kp_linear=4
-    # Kp_rotation=30
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    
-    
-    
-
-    # return
-    # Time_wait=500
-    # f=-25
-    # r=-180
-    # Kp_linear=4
-    # Kp_rotation=20
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # arm.set(True)
-    # Time_wait=1000
-    # v_max=70
-    # f=130
-    # r=17-90
-    # Kp_linear=2.7
-    # Kp_rotation=60
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    
-    # intake_ground_hold_in_basket(100)
-    # return
-    # return
-    
-    # intake_ground_to_top(90)
-    # wait(5,SECONDS)
-    # Time_wait=500
-    # f=-20
-    # r=-150
-    # Kp_linear=3.7
-    # Kp_rotation=40
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # Time_wait=1000
-    # v_max=70
-    # f=100
-    # r=-110
-    # Kp_linear=3
-    # Kp_rotation=50
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # return
-    # intake_ground_hold_in_basket_top(100)
-    # f=-15
-    # r=0
-    # Kp_linear=4
-    # Kp_rotation=30
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-
-
-    # v_max=100
-    # f=80
-    # r=5
-    # Kp_linear=6
-    # Kp_rotation=40
-    # autonomousPID([f, math.radians(r)+r_offset], v_min, v_max, Time_wait+extra_buffer,export_flag,
-    #               Kp_linear,Kp_rotation)
-    # arm.set(False)
-    
-   
 def vexcode_driver_function():
     # Start the driver control tasks
 
@@ -768,7 +568,11 @@ when_started1()
 
 # Global derivative gains used by autonomousPID (optional)
 Kd_linear_global = 0.0
-Kd_rotation_global = 2.0
+Kd_rotation_global = 0.0
+
+# Simple test selector. Set TEST_TO_RUN to one of:
+# "move60", "arc", "chain", "turn", "smooth", or None to disable.
+TEST_TO_RUN = None
 
 def test_move_60in(Kp_l, Kp_r, initialMaxSpeed=50, maxSpeed=90, label=""):
     """Run a single 60-inch move with given Kp values.
@@ -814,3 +618,173 @@ def test_kd_rotation():
     Kd_linear_global = 0.0
     Kd_rotation_global = 1.0   # example starting value
     test_move_60in(4.0, 30.0, label="Kd_rotation=1.0")
+
+# ------------------------------------------------------------
+# New quick profiles for field testing
+# ------------------------------------------------------------
+
+def test_arc_with_exit():
+    """24\" forward while arcing to +45 deg, keeps rolling at 15%."""
+    target_heading_rad = math.radians(45)
+    autonomousPID(
+        [24.0, target_heading_rad],
+        initialMaxSpeedLimit=30,
+        maxSpeedLimit=70,
+        time_out=1200,
+        export_flag=1,
+        Kp_l=4.0,
+        Kp_r=30.0,
+        exit_velocity_pct=15.0,
+        slow_down_distance=8.0,
+        settle_error_dist=0.6,
+        settle_error_heading=math.radians(2.0),
+        settle_loops=6,
+        stop_at_end=False,
+        heading_guard_deg=45.0,
+        heading_guard_floor=0.3,
+    )
+
+def test_two_leg_chain():
+    """Forward 36\", mild heading hold, then immediate 18\" to new heading."""
+    start_heading = inertialSensor.rotation() * pi / 180.0
+    # Leg 1
+    autonomousPID(
+        [36.0, start_heading],
+        initialMaxSpeedLimit=30,
+        maxSpeedLimit=80,
+        time_out=1500,
+        export_flag=0,
+        Kp_l=4.0,
+        Kp_r=30.0,
+        exit_velocity_pct=12.0,
+        slow_down_distance=10.0,
+        settle_error_dist=0.7,
+        settle_error_heading=math.radians(2.0),
+        settle_loops=6,
+        stop_at_end=False,
+        heading_guard_deg=20.0,
+        heading_guard_floor=0.2,
+    )
+    # Leg 2 (finishes stopped)
+    autonomousPID(
+        [18.0, math.radians(30.0)],
+        initialMaxSpeedLimit=30,
+        maxSpeedLimit=60,
+        time_out=1000,
+        export_flag=0,
+        Kp_l=4.0,
+        Kp_r=30.0,
+        exit_velocity_pct=0.0,
+        slow_down_distance=6.0,
+        settle_error_dist=0.6,
+        settle_error_heading=math.radians(2.0),
+        settle_loops=6,
+        stop_at_end=True,
+        heading_guard_deg=25.0,
+        heading_guard_floor=0.2,
+    )
+
+def test_in_place_turn():
+    """Zero-distance heading change to verify turn dynamics."""
+    current_heading = inertialSensor.rotation() * pi / 180.0
+    target_heading = current_heading + math.radians(90)
+    autonomousPID(
+        [0.0, target_heading],
+        initialMaxSpeedLimit=20,
+        maxSpeedLimit=50,
+        time_out=900,
+        export_flag=1,
+        Kp_l=0.0,     # linear unused
+        Kp_r=45.0,
+        exit_velocity_pct=0.0,
+        slow_down_distance=2.0,
+        settle_error_dist=0.2,
+        settle_error_heading=math.radians(1.0),
+        settle_loops=8,
+        stop_at_end=True,
+        heading_guard_deg=0.0,  # guard off so only turn PID acts
+        heading_guard_floor=0.0,
+    )
+
+def test_smooth_chain():
+    """
+    Three-leg sequence to assess between-move smoothness:
+      1) 36\" forward, heading hold, exits at 15%.
+      2) 24\" arc to +40°, exits at 12%.
+      3) 18\" forward to +60°, stops.
+    """
+    start_heading = inertialSensor.rotation() * pi / 180.0
+
+    # Leg 1: straight with exit velocity
+    autonomousPID(
+        [36.0, start_heading],
+        initialMaxSpeedLimit=30,
+        maxSpeedLimit=80,
+        time_out=1500,
+        export_flag=0,
+        Kp_l=4.0,
+        Kp_r=30.0,
+        exit_velocity_pct=15.0,
+        slow_down_distance=10.0,
+        settle_error_dist=0.7,
+        settle_error_heading=math.radians(2.0),
+        settle_loops=6,
+        stop_at_end=False,
+        heading_guard_deg=15.0,
+        heading_guard_floor=0.2,
+    )
+
+    # Leg 2: gentle arc
+    autonomousPID(
+        [24.0, math.radians(40.0)],
+        initialMaxSpeedLimit=30,
+        maxSpeedLimit=70,
+        time_out=1200,
+        export_flag=0,
+        Kp_l=4.0,
+        Kp_r=30.0,
+        exit_velocity_pct=12.0,
+        slow_down_distance=8.0,
+        settle_error_dist=0.6,
+        settle_error_heading=math.radians(2.0),
+        settle_loops=6,
+        stop_at_end=False,
+        heading_guard_deg=35.0,
+        heading_guard_floor=0.25,
+    )
+
+    # Leg 3: finish and stop
+    autonomousPID(
+        [18.0, math.radians(60.0)],
+        initialMaxSpeedLimit=30,
+        maxSpeedLimit=60,
+        time_out=1000,
+        export_flag=1,  # print final telemetry
+        Kp_l=4.0,
+        Kp_r=30.0,
+        exit_velocity_pct=0.0,
+        slow_down_distance=6.0,
+        settle_error_dist=0.5,
+        settle_error_heading=math.radians(1.8),
+        settle_loops=6,
+        stop_at_end=True,
+        heading_guard_deg=25.0,
+        heading_guard_floor=0.2,
+    )
+
+
+def run_selected_test(name):
+    """Dispatch helper so tests can be triggered from when_started1."""
+    n = (name or "").lower()
+    if n == "move60":
+        test_move_60in(4.0, 30.0)
+    elif n == "arc":
+        test_arc_with_exit()
+    elif n == "chain":
+        test_two_leg_chain()
+    elif n == "turn":
+        test_in_place_turn()
+    elif n == "smooth":
+        test_smooth_chain()
+    else:
+        print("No test selected or unknown name:", name)
