@@ -126,9 +126,16 @@ def getMTD(targetAngle, endAngle, robotAngle):
     #Moves MTD
     MTD =moveAngleWithinRange(robotAngle,MTD)
 
-
+"""
+A function to linearize the motor speeds so an input of 50% will actually be 50% of the max speed, not 50% of the max voltage which is what the motors actually take in.
+leftMS: the left , unlinearized, motor speed as a percentage from -100 to 100
+rightMS: the right, unlinearized, motor speed as a percentage from -100 to 100
+Returns a two digit tuple of the left and right motor speeds, linearized, as percentages from -100 to 100
+"""
 def linearize(leftMS, rightMS):
-    pass
+    
+
+    return (leftMS, rightMS)
 
 
 """
