@@ -45,6 +45,12 @@ from vex import *
 
 # Begin project code
 
+def drivetrain(leftSpeed, rightSpeed):
+    motor_FL.spin(FORWARD, leftSpeed, PERCENT)
+    motor_BL.spin(FORWARD, leftSpeed, PERCENT)
+    motor_FR.spin(FORWARD, rightSpeed, PERCENT)
+    motor_BR.spin(FORWARD, rightSpeed, PERCENT)
+
 """
 This is a threaded function
 """
@@ -126,17 +132,49 @@ def getMTD(targetAngle, endAngle, robotAngle):
     #Moves MTD
     MTD =moveAngleWithinRange(robotAngle,MTD)
 
+    return MTD
+
 """
 A function to linearize the motor speeds so an input of 50% will actually be 50% of the max speed, not 50% of the max voltage which is what the motors actually take in.
 leftMS: the left , unlinearized, motor speed as a percentage from -100 to 100
 rightMS: the right, unlinearized, motor speed as a percentage from -100 to 100
 Returns a two digit tuple of the left and right motor speeds, linearized, as percentages from -100 to 100
 """
+
+a = 8 #quadratic
+b = 90 #linear
+c = 2 #verticalTranslation
+d = 1 #deadzone
+p = 3 #power
+
 def linearize(leftMS, rightMS):
-    
+    global a,b,c,d,p   
+    leftMS = inputCurve(leftMS, a,b,c,d,p)
+    rightMS = inputCurve(rightMS, a,b,c,d,p)
 
     return (leftMS, rightMS)
 
+
+#Uses inputCurveRaw but takes into account a deadzone.
+def inputCurve(input, a, b, c, d, p):
+
+    if(input >= d/100):
+        #Modified input
+        y = inputCurveRaw((1+d/100)*(input-d/100), a,b,p) + c/100
+
+    elif (input <= -d/100):
+        input *= -1
+        y = -inputCurveRaw((1+d/100)*(input-d/100), a,b,p) - c/100
+
+    else:
+        y = 0
+
+    return y
+
+#Linearization function that doesnt account for deadzone
+def inputCurveRaw(input, a, b, p):
+    y = (a/100)*pow(input,p) +  (b/100)*input
+    return y
 
 """
 moveTo is the parent function to move the robot. 
@@ -169,6 +207,11 @@ def moveTo(x, y, endAngle, direction):
         #Gets modifed target angle, explaied in detail above the method.
         MTD = getMTD(targetAngle, endAngle, robotAngle)
 
+        leftSpeedRaw = MTD-robotAngle
+        rightSpeedRaw = -1*(MTD-robotAngle)
+
+        linearizedSpeeds = linearize(leftSpeedRaw, rightSpeedRaw)
+        drivetrain(linearizedSpeeds[0], linearizedSpeeds[1])
         
 
 def pre_autonomous():
