@@ -7,9 +7,9 @@ import math
 brain=Brain()
 
 # Robot configuration code
-motor_18 = Motor(Ports.PORT18, GearSetting.RATIO_18_1, False)
 controller_1 = Controller(PRIMARY)
 digital_out_a = DigitalOut(brain.three_wire_port.a)
+digital_out_b = DigitalOut(brain.three_wire_port.b)
 
 
 # wait for rotation sensor to fully initialize
@@ -53,78 +53,47 @@ from vex import *
 
 # Begin project code
 
-motor_18.set_velocity(100, PERCENT)
-
 """
-function to flip the claw. Takes in a string that specifies which claw to flip.
-top: flips the top claw
-bottom: flips the bottom claw
-both: flips both claws
+function to flip the claw. Doesnt take any input and optionally returns the position of the claw after flipping it.
+You can also access the position of the claw by using the global variable clawPosition. 0 = starting position, 1 = flipped position
 """
-topClawPosition = 0
-bottomClawPosition = 0
-
-def flip_claw(claw):
-    global topClawPosition
-    global bottomClawPosition
-    
-    if claw == "top":
-        if topClawPosition + bottomClawPosition %2 == 0:
-            motor_18.spin_for(FORWARD, 180, DEGREES)
-            topClawPosition += 1
-        else:
-            motor_18.spin_for(REVERSE, 180, DEGREES)
-            topClawPosition -= 1
-
-    elif claw == "bottom":
-        if topClawPosition + bottomClawPosition %2 == 0:
-            motor_18.spin_for(REVERSE, 180, DEGREES)
-            bottomClawPosition -= 1
-        else:
-            motor_18.spin_for(FORWARD, 180, DEGREES)
-            bottomClawPosition += 1
-
-    elif claw == "both":
-        if topClawPosition + bottomClawPosition %2 == 0:
-            motor_18.spin_for(FORWARD, 360, DEGREES)
-            topClawPosition += 1
-            bottomClawPosition += 1
-
-        else:
-            motor_18.spin_for(REVERSE, 360, DEGREES)
-            topClawPosition -= 1
-            bottomClawPosition -= 1
-        
+clawPosition = 0
+def flip_claw():
+    global clawPosition
+    if digital_out_b.value() == False:
+        digital_out_b.set(True)
+        clawPosition = 1
     else:
-        print("Invalid claw specified. Please choose 'top', 'bottom', or 'both'.")
-    
+        digital_out_b.set(False)
+        clawPosition = 0
+
     #so kawaii :3 <3
     brain.screen.clear_line(1)
     brain.screen.set_cursor(1, 1)
-    brain.screen.print("so kawaii :3 <3 "+str(topClawPosition) + "  " + str(bottomClawPosition))
+    brain.screen.print("so kawaii :3 <3 "+str(clawPosition))
 
+    return clawPosition
+
+
+toggleClaw = False
+toggleFlip = False
 while True:
-    if controller_1.buttonX.pressing():
-        flip_claw("top")
-        while controller_1.buttonX.pressing() :
-            wait(10, MSEC)
-
-    if controller_1.buttonB.pressing():
-        flip_claw("bottom")
-        while controller_1.buttonB.pressing() :
-            wait(10, MSEC)
-
-    if controller_1.buttonA.pressing():
-        flip_claw("both")
-        while controller_1.buttonA.pressing() :
-            wait(10, MSEC)
+    if controller_1.buttonR1.pressing():
+        if toggleFlip == False:
+            flip_claw()
+        toggleFlip = True
+    elif toggleFlip == True:
+        toggleFlip = False
     
 
     #Opens an closes claw
     if controller_1.buttonY.pressing():
-        if digital_out_a.value() == False:
-            digital_out_a.set(True)
-        else:
-            digital_out_a.set(False)
-        while controller_1.buttonY.pressing() :
-            wait(10, MSEC)
+        if toggleClaw == False:
+            if digital_out_a.value() == False:
+                digital_out_a.set(True)
+            else:
+                digital_out_a.set(False)
+        toggleClaw = True
+    elif toggleClaw == True:
+        toggleClaw = False
+
