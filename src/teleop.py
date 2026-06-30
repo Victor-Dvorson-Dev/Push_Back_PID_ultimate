@@ -12,6 +12,8 @@ motor_FL = Motor(Ports.PORT2, GearSetting.RATIO_6_1, False)
 motor_BR = Motor(Ports.PORT10, GearSetting.RATIO_6_1, True)
 motor_FR = Motor(Ports.PORT9, GearSetting.RATIO_6_1, True)
 motor_BL = Motor(Ports.PORT1, GearSetting.RATIO_6_1, False)
+digital_out_a = DigitalOut(brain.three_wire_port.a)
+digital_out_b = DigitalOut(brain.three_wire_port.b)
 inertial_21 = Inertial(Ports.PORT21)
 
 
@@ -97,6 +99,54 @@ def inputCurve(input, a, b, c, d, p):
         y = 0
 
     return y
+
+"""
+function to flip the claw. Doesnt take any input and optionally returns the position of the claw after flipping it.
+You can also access the position of the claw by using the global variable clawPosition. 0 = starting position, 1 = flipped position
+"""
+clawPosition = 0
+def flip_claw():
+    global clawPosition
+    if digital_out_b.value() == False:
+        digital_out_b.set(True)
+        clawPosition = 1
+    else:
+        digital_out_b.set(False)
+        clawPosition = 0
+
+    #so kawaii :3 <3
+    brain.screen.clear_line(1)
+    brain.screen.set_cursor(1, 1)
+    brain.screen.print("so kawaii :3 <3 "+str(clawPosition))
+
+    return clawPosition
+
+def scoring():
+
+    flipToggle = False
+    clawToggle = False
+
+
+
+    while True:
+        if controller_1.buttonR1.pressing():
+            if not flipToggle:
+                flip_claw()
+                flipToggle = True
+        elif (flipToggle):
+            flipToggle = False
+        
+        #Opens an closes claw
+        if controller_1.buttonR2.pressing():
+            if clawToggle == False:
+                if digital_out_a.value() == False:
+                    digital_out_a.set(True)
+                else:
+                    digital_out_a.set(False)
+                clawToggle = True
+        elif clawToggle == True:
+            clawToggle = False
+            
 
 def driveFunction():     #Threaded function to drive motors based on controller input
 
@@ -255,52 +305,6 @@ def setTorque(leftT,rightT):
     motor_BR.set_max_torque(rightT, PERCENT)
 
 """
-def arm_descore():
-
-    toggle_arm = False
-    toggle_descore = False
-
-    arm_down = False
-    descore_on = False
-
-    while True:
-
-        if ( controller_1.buttonR2.pressing() and toggle_descore == False):
-            
-            if (descore_on == True):
-                descore_on = False
-                digital_out_f.set(False)
-
-            elif (descore_on == False):
-                descore_on = True
-                digital_out_f.set(True)
-            
-            toggle_descore = True
-
-        elif ( controller_1.buttonR2.pressing() == False and toggle_descore == True):
-            toggle_descore = False
-
-
-
-        if ( controller_1.buttonB.pressing() and toggle_arm == False):
-            
-            if (arm_down == True):
-                arm_down = False
-                digital_out_a.set(False)
-
-            elif (arm_down == False):
-                arm_down = True
-                digital_out_a.set(True)
-            
-            toggle_arm = True
-
-        elif ( controller_1.buttonB.pressing() == False and toggle_arm == True):
-            toggle_arm = False
-
-        
-        wait(20, MSEC)
-"""
-"""
 def intake():
 
     motor_10.set_velocity(100, PERCENT)
@@ -377,18 +381,14 @@ def tipPrevention():
         motor_MR.set_max_torque(100, PERCENT)  
 
     """
+
+
+
 def CIO():
 
     #prints the temeprature of the warmest motor 
     controller_1.screen.print(max(motor_FL.temperature(PERCENT),motor_FR.temperature(PERCENT),motor_BL.temperature(PERCENT),motor_BR.temperature(PERCENT)))    
 
-
-def macroUp():
-    setSpeed(-50,-50)
-
-
-def macroDown():
-    pass
 
 
 def pre_autonomous():
